@@ -36,6 +36,7 @@ Edit these at the top of `ghost.c`:
 #define URL       "https://your-target-server.com"
 #define CERT      "/path/to/your/cert.cer"
 #define KEY       "/path/to/your/key.pem"
+#define TARGETHOST "your-target-server.com"
 ```
 
 ## credits
