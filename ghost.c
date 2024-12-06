@@ -26,6 +26,7 @@
 #define URL       "https://your-target-server.com"
 #define CERT      "/path/to/your/cert.cer"
 #define KEY       "/path/to/your/key.pem"
+#define TARGETHOST "your-target-server.com"
 
 static SSL_CTX *ctx;
 
@@ -37,6 +38,7 @@ struct response {
 /* functions */
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, SSL *ssl);
 static char *get_path(const char *request);
+static struct curl_slist *get_headers(const char *buf);
 static void handle(SSL *ssl);
 static SSL_CTX *sslsetup(void);
 static int serverinit(void);
@@ -58,21 +60,66 @@ write_cb(void *ptr, size_t size, size_t nmemb, SSL *ssl)
 static char *
 get_path(const char *request)
 {
-    char *path_start, *path_end, *path;
-    
-    path_start = strchr(request, ' ');
+    char *path_start = strchr(request, ' ');
     if (!path_start) return strdup("/");
     path_start++;
     
-    path_end = strchr(path_start, ' ');
+    char *path_end = strchr(path_start, ' ');
     if (!path_end) return strdup("/");
 
-    path = malloc(path_end - path_start + 1);
+    char *path = malloc(path_end - path_start + 1);
     if (!path) return strdup("/");
 
     memcpy(path, path_start, path_end - path_start);
     path[path_end - path_start] = '\0';
     return path;
+}
+
+/* Get HTTP headers from original request and modify them for forwarding
+ * 
+ * Processes raw HTTP request buffer into curl_slist of headers
+ * Sets target Host header first, then copies all original headers
+ * except Connection, Accept-Encoding, and original Host
+ * 
+ * buf: Raw HTTP request buffer
+ * returns: curl_slist of headers for forwarding, needs to be freed
+ *
+ * Example input:
+ * GET / HTTP/1.1
+ * Host: my-host.com
+ * Accept: text/html,application/xhtml+xml
+ * 
+ * Becomes:
+ * Host: your-target-server.com
+ * Accept: text/html,application/xhtml+xml
+ */
+static struct curl_slist *
+get_headers(const char *buf)
+{
+    struct curl_slist *headers = NULL;
+    char *header_start = strstr(buf, "\r\n") + 2;
+    char *header_end;
+    char header[BUFSIZ];
+    char host_header[256];
+
+    snprintf(host_header, sizeof(host_header), "Host: %s", TARGETHOST);
+    headers = curl_slist_append(headers, host_header);
+
+    while ((header_end = strstr(header_start, "\r\n")) != NULL) {
+        if (header_start == header_end) break;
+        
+        size_t len = header_end - header_start;
+        memcpy(header, header_start, len);
+        header[len] = '\0';
+        
+        if (strncasecmp(header, "Connection:", 11) != 0 &&
+            strncasecmp(header, "Accept-Encoding:", 16) != 0 &&
+            strncasecmp(header, "Host:", 5) != 0) {
+            headers = curl_slist_append(headers, header);
+        }
+        header_start = header_end + 2;
+    }
+    return headers;
 }
 
 /* SSL connection handler
@@ -88,17 +135,24 @@ handle(SSL *ssl)
     char url[BUFSIZ];
     int n;
     struct curl_slist *headers = NULL;
+    char method[10] = {0};
 
     curl = curl_easy_init();
     if (!curl) return;
 
     n = SSL_read(ssl, buf, sizeof(buf) - 1);
     if (n <= 0) goto cleanup;
-
+    
     buf[n] = '\0';
+
+    sscanf(buf, "%s", method);
+    fprintf(stderr, "\n=== REQUEST %s ===\n%s\n", method, buf);
+
     path = get_path(buf);
     snprintf(url, sizeof(url), "%s%s", URL, path);
     free(path);
+
+    headers = get_headers(buf);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
@@ -106,13 +160,22 @@ handle(SSL *ssl)
     curl_easy_setopt(curl, CURLOPT_HEADER, 1L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    
-    headers = curl_slist_append(headers, "Accept: */*");
-    headers = curl_slist_append(headers, "Accept-Encoding: identity");
-    headers = curl_slist_append(headers, "X-Ben: Rad");
+    curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
+    if (strcmp(method, "POST") == 0) {
+        char *body = strstr(buf, "\r\n\r\n");
+        if (body) {
+            body += 4;
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(body));
+        }
+    }
+
     res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        fprintf(stderr, "curl failed: %s\n", curl_easy_strerror(res));
+    }
 
 cleanup:
     if (headers) curl_slist_free_all(headers);
@@ -131,6 +194,7 @@ sslsetup(void)
     OpenSSL_add_ssl_algorithms();
 
     ctx = SSL_CTX_new(TLS_server_method());
+
     if (!ctx) exit(1);
 
     if (SSL_CTX_use_certificate_file(ctx, CERT, SSL_FILETYPE_PEM) <= 0
@@ -147,9 +211,7 @@ static int
 serverinit(void)
 {
     struct sockaddr_in addr;
-    int sd;
-
-    sd = socket(AF_INET, SOCK_STREAM, 0);
+    int sd = socket(AF_INET, SOCK_STREAM, 0);
     if (sd < 0) exit(1);
 
     addr.sin_family = AF_INET;
