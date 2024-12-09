@@ -21,7 +21,8 @@ A tiny transparent HTTPS reverse proxy that silently forwards your traffic. No b
 
 ## building
 ```bash
-gcc -o ghost ghost.c -lssl -lcrypto -lcurl
+make
+sudo make install
 ```
 
 ## running
