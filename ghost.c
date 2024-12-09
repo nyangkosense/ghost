@@ -19,10 +19,11 @@
 * filter
 *
 */
-
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <errno.h>
 #include <openssl/ssl.h>
@@ -403,7 +404,7 @@ cleanup:
 /* SSL context setup
  * Initializes SSL library and loads certificates
  *
-/* verbose output */
+ * verbose output */
 static SSL_CTX *
 sslsetup(void)
 {
